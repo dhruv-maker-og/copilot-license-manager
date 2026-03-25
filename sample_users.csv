@@ -1,4 +1,5 @@
-username,id,type
-octocat,1,User
-monalisa,2,User
-hubot,3,User
+GitHub com login,GitHub com name,GitHub com profile,GitHub com two-factor auth,GitHub com enterprise managed user,Visual Studio subscription email,License type,acme-corp owner,acme-corp member,Total user accounts
+alice,Alice Smith,https://github.com/alice,TRUE,FALSE,,Enterprise: User,TRUE,FALSE,1
+bob,Bob Jones,https://github.com/bob,TRUE,FALSE,bob@company.com,Enterprise: Visual Studio subscriber,FALSE,TRUE,1
+charlie,Charlie Brown,https://github.com/charlie,TRUE,FALSE,,Enterprise: User,FALSE,TRUE,1
+,Managed User,https://github.com/acme_managed,TRUE,TRUE,,Enterprise: User,FALSE,TRUE,1

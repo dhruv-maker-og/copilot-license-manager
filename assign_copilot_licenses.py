@@ -3,14 +3,13 @@
 Bulk GitHub Copilot License Assignment Tool
 
 Assigns GitHub Copilot seats to organization members in bulk from a CSV file,
-and reports assignment status. Can also export org members to CSV for easy editing.
+and reports assignment status.
 
-Usage:
-    # Export org members to CSV
-    python assign_copilot_licenses.py --org my-org --export-members --output members.csv
-
-    # Assign licenses from CSV
-    python assign_copilot_licenses.py --org my-org --csv members.csv
+Workflow:
+    1. Go to GitHub Enterprise → People → Export as CSV
+    2. Copy the downloaded CSV into this directory
+    3. Open the CSV and DELETE rows for users who should NOT get Copilot; save
+    4. Run: python assign_copilot_licenses.py --org my-org --csv people_export.csv
 """
 
 import argparse
@@ -26,6 +25,10 @@ import requests
 API_BASE = "https://api.github.com"
 API_VERSION = "2022-11-28"
 
+# Columns tried (in order) when --column is not explicitly specified.
+# The first match found in the CSV header is used.
+AUTO_DETECT_COLUMNS = ["GitHub com login", "login", "username", "github_handle"]
+
 
 def get_headers(token):
     return {
@@ -33,56 +36,6 @@ def get_headers(token):
         "Authorization": f"Bearer {token}",
         "X-GitHub-Api-Version": API_VERSION,
     }
-
-
-# ── Export Org Members ───────────────────────────────────────────────────────
-
-
-def export_org_members(org, token, output_path, role_filter="all"):
-    """Fetch all organization members and write them to a CSV file."""
-    headers = get_headers(token)
-    members = []
-    page = 1
-
-    print(f"Fetching members of '{org}' (role={role_filter})...")
-
-    while True:
-        resp = requests.get(
-            f"{API_BASE}/orgs/{org}/members",
-            headers=headers,
-            params={"per_page": 100, "page": page, "role": role_filter},
-            timeout=30,
-        )
-        if resp.status_code == 401:
-            print("ERROR: Authentication failed. Check your GitHub token.")
-            sys.exit(1)
-        if resp.status_code == 403:
-            print("ERROR: Forbidden. Your token lacks permission to list org members.")
-            sys.exit(1)
-        if resp.status_code == 404:
-            print(f"ERROR: Organization '{org}' not found.")
-            sys.exit(1)
-        resp.raise_for_status()
-
-        batch = resp.json()
-        if not batch:
-            break
-        members.extend(batch)
-        page += 1
-
-    if not members:
-        print("No members found.")
-        return
-
-    with open(output_path, "w", newline="", encoding="utf-8") as f:
-        writer = csv.writer(f)
-        writer.writerow(["username", "id", "type"])
-        for m in members:
-            writer.writerow([m["login"], m["id"], m["type"]])
-
-    print(f"Exported {len(members)} members to '{output_path}'")
-    print("Edit the CSV to keep only the users you want to assign Copilot licenses to,")
-    print("then run:  python assign_copilot_licenses.py --org <ORG> --csv " + output_path)
 
 
 # ── Pre-flight Check ─────────────────────────────────────────────────────────
@@ -133,26 +86,62 @@ def preflight_check(org, token):
 
 
 def read_usernames_from_csv(csv_path, column):
-    """Read and deduplicate usernames from a CSV file."""
+    """Read and deduplicate usernames from a CSV file.
+
+    If column is None, the username column is auto-detected by trying
+    AUTO_DETECT_COLUMNS in order (case-insensitive). If column is explicitly
+    provided via --column, it is used directly.
+
+    Rows where the resolved column value is blank are silently skipped and
+    counted (common for enterprise-managed users with no GitHub.com account).
+    """
     if not os.path.isfile(csv_path):
         print(f"ERROR: CSV file not found: {csv_path}")
         sys.exit(1)
 
     usernames = []
     seen = set()
+    skipped_blank = 0
 
     with open(csv_path, "r", encoding="utf-8") as f:
         reader = csv.DictReader(f)
-        if column not in (reader.fieldnames or []):
-            print(f"ERROR: Column '{column}' not found in CSV.")
-            print(f"  Available columns: {reader.fieldnames}")
-            sys.exit(1)
+        fieldnames = reader.fieldnames or []
+
+        # Resolve which column to use
+        if column is None:
+            # Auto-detect: case-insensitive match against AUTO_DETECT_COLUMNS
+            fieldnames_lower = {fn.strip().lower(): fn for fn in fieldnames}
+            resolved_column = None
+            for candidate in AUTO_DETECT_COLUMNS:
+                if candidate.lower() in fieldnames_lower:
+                    resolved_column = fieldnames_lower[candidate.lower()]
+                    break
+            if resolved_column is None:
+                print("ERROR: Could not auto-detect a username column in the CSV.")
+                print(f"  Tried (in order): {', '.join(repr(c) for c in AUTO_DETECT_COLUMNS)}")
+                print(f"  Available columns: {fieldnames}")
+                print("  Use --column <name> to specify the column explicitly.")
+                sys.exit(1)
+            print(f"Detected username column: '{resolved_column}'")
+        else:
+            # Explicit column — verify it exists
+            if column not in fieldnames:
+                print(f"ERROR: Column '{column}' not found in CSV.")
+                print(f"  Available columns: {fieldnames}")
+                sys.exit(1)
+            resolved_column = column
 
         for row in reader:
-            username = row[column].strip()
-            if username and username.lower() not in seen:
+            username = row[resolved_column].strip()
+            if not username:
+                skipped_blank += 1
+                continue
+            if username.lower() not in seen:
                 usernames.append(username)
                 seen.add(username.lower())
+
+    if skipped_blank:
+        print(f"  Note: Skipped {skipped_blank} row(s) with a blank '{resolved_column}' value.")
 
     if not usernames:
         print("ERROR: No usernames found in CSV.")
@@ -321,18 +310,30 @@ def print_status_report(usernames, failed_users, seats):
 
 def build_parser():
     parser = argparse.ArgumentParser(
-        description="Bulk assign GitHub Copilot licenses to organization members.",
+        description=(
+            "Bulk assign GitHub Copilot licenses to organization members "
+            "from a GitHub Enterprise People CSV export."
+        ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
+Workflow:
+  1. Go to GitHub Enterprise \u2192 People \u2192 Export as CSV
+  2. Copy the downloaded CSV into this directory
+  3. Open the CSV and DELETE rows for users who should NOT get Copilot; save
+  4. Run this script to assign licenses
+
 Examples:
-  # Export org members to a CSV file
-  python assign_copilot_licenses.py --org my-org --export-members --output members.csv
+  # Assign licenses from an Enterprise People CSV export
+  python assign_copilot_licenses.py --org my-org --csv enterprise_people.csv
 
-  # Assign licenses from a CSV
-  python assign_copilot_licenses.py --org my-org --csv users.csv
+  # Skip the confirmation prompt (useful in CI/CD pipelines)
+  python assign_copilot_licenses.py --org my-org --csv enterprise_people.csv --yes
 
-  # Assign with a custom column name and batch size
-  python assign_copilot_licenses.py --org my-org --csv users.csv --column github_handle --batch-size 25
+  # Override the auto-detected username column
+  python assign_copilot_licenses.py --org my-org --csv users.csv --column github_handle
+
+  # Use a custom batch size
+  python assign_copilot_licenses.py --org my-org --csv enterprise_people.csv --batch-size 25
         """,
     )
 
@@ -343,38 +344,31 @@ Examples:
         help="GitHub personal access token (default: reads GITHUB_TOKEN env var)",
     )
 
-    # Mode: export members
-    export_group = parser.add_argument_group("Export mode")
-    export_group.add_argument(
-        "--export-members",
-        action="store_true",
-        help="Export organization members to a CSV file instead of assigning licenses",
+    assign_group = parser.add_argument_group("Assign options")
+    assign_group.add_argument(
+        "--csv",
+        required=True,
+        help="Path to CSV file (GitHub Enterprise People export or compatible format)",
     )
-    export_group.add_argument(
-        "--output",
-        default="members.csv",
-        help="Output CSV path for --export-members (default: members.csv)",
-    )
-    export_group.add_argument(
-        "--role",
-        choices=["all", "admin", "member"],
-        default="all",
-        help="Filter members by role when exporting (default: all)",
-    )
-
-    # Mode: assign licenses
-    assign_group = parser.add_argument_group("Assign mode")
-    assign_group.add_argument("--csv", default=None, help="Path to CSV file with usernames")
     assign_group.add_argument(
         "--column",
-        default="username",
-        help="CSV column name containing GitHub usernames (default: username)",
+        default=None,
+        help=(
+            "CSV column containing GitHub.com usernames. "
+            "If omitted, auto-detected from: "
+            + ", ".join(repr(c) for c in AUTO_DETECT_COLUMNS)
+        ),
     )
     assign_group.add_argument(
         "--batch-size",
         type=int,
         default=50,
         help="Number of users per API request (default: 50)",
+    )
+    assign_group.add_argument(
+        "--yes", "-y",
+        action="store_true",
+        help="Skip the confirmation prompt before assigning licenses",
     )
 
     return parser
@@ -391,37 +385,44 @@ def main():
         print("  Set the GITHUB_TOKEN environment variable or use --token <PAT>")
         sys.exit(1)
 
-    # ── Export Mode ──
-    if args.export_members:
-        export_org_members(args.org, token, args.output, args.role)
-        return
-
-    # ── Assign Mode ──
-    if not args.csv:
-        print("ERROR: Provide --csv <file> to assign licenses, or use --export-members.")
-        parser.print_help()
-        sys.exit(1)
-
     # Step 1: Pre-flight check
     print()
     preflight_check(args.org, token)
 
-    # Step 2: Read usernames
+    # Step 2: Read usernames from the Enterprise People CSV
     usernames = read_usernames_from_csv(args.csv, args.column)
     print(f"Loaded {len(usernames)} unique usernames from '{args.csv}'")
     print()
 
-    # Step 3: Assign licenses
+    # Step 3: Confirmation prompt
+    if not args.yes:
+        print(f"Users to be assigned Copilot licenses ({len(usernames)} total):")
+        for u in usernames[:5]:
+            print(f"  - {u}")
+        if len(usernames) > 5:
+            print(f"  ... and {len(usernames) - 5} more")
+        print()
+        try:
+            answer = input(f"Assign Copilot licenses to {len(usernames)} user(s)? [y/N]: ").strip().lower()
+        except (KeyboardInterrupt, EOFError):
+            print("\nAborted.")
+            sys.exit(0)
+        if answer not in ("y", "yes"):
+            print("Aborted.")
+            sys.exit(0)
+        print()
+
+    # Step 4: Assign licenses
     total_created, failed_users = assign_licenses(
         args.org, token, usernames, args.batch_size
     )
 
-    # Step 4: Fetch current seats for status report
+    # Step 5: Fetch current seats for status report
     print("Fetching current seat assignments for status report...")
     seats = fetch_all_seats(args.org, token)
     print()
 
-    # Step 5: Print status report
+    # Step 6: Print status report
     print_status_report(usernames, failed_users, seats)
 
     # Exit with error code if any failures

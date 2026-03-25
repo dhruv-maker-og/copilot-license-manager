@@ -9,7 +9,7 @@ Bulk assign GitHub Copilot licenses to organization members using a CSV file.
 | Requirement | Details |
 |---|---|
 | **Python** | 3.8 or later |
-| **GitHub PAT** | With `manage_billing:copilot` scope (classic) or **"GitHub Copilot Business" write** permission (fine-grained) |
+| **GitHub PAT** | Fine-grained token with **"GitHub Copilot Business" write** permission |
 | **Org Admin** | You must be an **owner** of the GitHub organization |
 | **Copilot Plan** | Organization must have an active Copilot Business or Enterprise subscription |
 
@@ -23,8 +23,6 @@ pip install -r requirements.txt
 
 ## Creating a GitHub Personal Access Token (PAT)
 
-### Option A: Fine-grained PAT (recommended)
-
 1. Go to **Settings → Developer settings → Personal access tokens → Fine-grained tokens**
 2. Click **Generate new token**
 3. Set **Resource owner** to your organization
@@ -32,16 +30,6 @@ pip install -r requirements.txt
    - **GitHub Copilot Business** → **Read and write**
    - **Members** → **Read-only** (needed for `--export-members`)
 5. Click **Generate token** and copy it
-
-### Option B: Classic PAT
-
-1. Go to **Settings → Developer settings → Personal access tokens → Tokens (classic)**
-2. Click **Generate new token**
-3. Select scopes:
-   - `manage_billing:copilot`
-   - `read:org`
-   - `admin:org` (if `manage_billing:copilot` is not available)
-4. Click **Generate token** and copy it
 
 ### Set the token as an environment variable
 
@@ -60,60 +48,58 @@ set GITHUB_TOKEN=ghp_xxxxxxxxxxxxxxxxxxxx
 
 ## Usage
 
-### Step 1: Export Organization Members to CSV
+### Step 1: Download the Enterprise People CSV
 
-Instead of manually creating a CSV, pull the member list directly from your org:
+1. Sign in to your GitHub Enterprise account
+2. Go to **`github.com/enterprises/<your-enterprise>/people`**
+3. Click **Export as CSV** (top-right of the page)
+4. Copy the downloaded CSV file into this repository folder
 
-```bash
-python assign_copilot_licenses.py --org my-org --export-members --output members.csv
-```
-
-This creates `members.csv` with columns: `username`, `id`, `type`.
-
-**Options:**
-| Flag | Description |
-|---|---|
-| `--output <path>` | Output file path (default: `members.csv`) |
-| `--role <all\|admin\|member>` | Filter by org role (default: `all`) |
-
-**Example output:**
-```
-username,id,type
-alice,12345,User
-bob,67890,User
-charlie,11111,User
-```
+The export contains one row per enterprise member. The key column the script looks for is **`GitHub com login`** — the member's GitHub.com username.
 
 ### Step 2: Edit the CSV
 
-Open `members.csv` and **remove any users** you do NOT want to assign Copilot licenses to. Keep only the rows for users who should receive a license.
+Open the CSV file **from the repository folder** (where you copied it in Step 1) and **delete the rows for any users who should NOT receive a Copilot license**. Keep only the rows for users who should get a seat. **Save the file back to the same location** — no need to move it anywhere.
 
-> **Tip:** The only required column is `username`. You can delete the `id` and `type` columns if you want a cleaner file.
+> **Tip:** Users who are enterprise-managed users with no GitHub.com account will have a blank `GitHub com login` cell — the script automatically skips those rows and tells you how many were skipped.
 
 ### Step 3: Assign Licenses
 
+> **Note:** The GitHub API only supports Copilot seat assignment at the **organization** level — there is no enterprise-level assignment endpoint. If your users span multiple orgs, run the script once per org.
+
+From the repository folder, run:
+
 ```bash
-python assign_copilot_licenses.py --org my-org --csv members.csv
+python assign_copilot_licenses.py --org <your-org-name> --csv <filename>.csv
 ```
+
+Replace `<your-org-name>` and `<filename>.csv` with the actual org and file names.
 
 **Options:**
 | Flag | Description |
 |---|---|
-| `--csv <path>` | Path to CSV file with usernames (required) |
-| `--column <name>` | Column name containing GitHub usernames (default: `username`) |
+| `--csv <path>` | Path to the CSV file (required) |
+| `--column <name>` | Column containing GitHub.com usernames (default: auto-detected from `GitHub com login`, `login`, `username`, `github_handle`) |
 | `--batch-size <n>` | Users per API request (default: `50`) |
 | `--token <pat>` | GitHub PAT (default: reads `GITHUB_TOKEN` env var) |
+| `--yes` / `-y` | Skip the confirmation prompt (for CI/scripts) |
 
 ### Full Example Workflow
 
 ```bash
-# 1. Export all org members
-python assign_copilot_licenses.py --org acme-corp --export-members --output acme_members.csv
+# 1. In your browser, go to:
+#    https://github.com/enterprises/acme-corp/people
+#    Click "Export as CSV" and save the file as acme_people.csv
 
-# 2. Edit acme_members.csv (remove users who shouldn't get Copilot)
+# 2. Copy acme_people.csv into this directory.
+#    Open it in Excel / a text editor, delete rows for users who should NOT
+#    get Copilot, and save the file back in this same directory.
 
-# 3. Assign licenses
-python assign_copilot_licenses.py --org acme-corp --csv acme_members.csv
+# 3. Assign licenses (script will show a preview + confirmation prompt)
+python assign_copilot_licenses.py --org acme-corp --csv acme_people.csv
+
+# 4. To skip the prompt in a CI/CD pipeline:
+python assign_copilot_licenses.py --org acme-corp --csv acme_people.csv --yes
 ```
 
 ### Output
@@ -159,94 +145,36 @@ Fetching current seat assignments for status report...
 
 ## CSV Format
 
-The CSV must have a header row. By default the script looks for a column named `username`:
+The script accepts the **GitHub Enterprise People export CSV** directly — no pre-processing required.
+
+### Auto-detected columns
+
+The script looks for a username column in this order (case-insensitive):
+
+| Priority | Column name | Source |
+|---|---|---|
+| 1 | `GitHub com login` | GitHub Enterprise People export (standard) |
+| 2 | `login` | GitHub API JSON / custom exports |
+| 3 | `username` | Legacy format used by earlier versions of this tool |
+| 4 | `github_handle` | Custom HR/IT system exports |
+
+### Enterprise People export example
 
 ```csv
-username
-alice
-bob
-charlie
+GitHub com login,GitHub com name,GitHub com profile,GitHub com two-factor auth,GitHub com enterprise managed user,Visual Studio subscription email,License type,acme-corp owner,acme-corp member,Total user accounts
+alice,Alice Smith,https://github.com/alice,TRUE,FALSE,,Enterprise: User,TRUE,FALSE,1
+bob,Bob Jones,https://github.com/bob,TRUE,FALSE,bob@company.com,Enterprise: Visual Studio subscriber,FALSE,TRUE,1
+charlie,Charlie Brown,https://github.com/charlie,TRUE,FALSE,,Enterprise: User,FALSE,TRUE,1
 ```
 
-If your CSV uses a different column name (e.g., `github_handle`), specify it:
+Rows with a blank `GitHub com login` (enterprise-managed users with no GitHub.com account) are **automatically skipped** and counted in the summary.
+
+### Overriding column auto-detection
+
+If your CSV uses a different column name, pass `--column`:
 
 ```bash
 python assign_copilot_licenses.py --org my-org --csv users.csv --column github_handle
-```
-
----
-
-## How to Test
-
-### 1. Dry-run with `--export-members` (safe, read-only)
-
-Start by testing the export feature — this only **reads** data and does not assign anything:
-
-```bash
-python assign_copilot_licenses.py --org YOUR-ORG --export-members --output test_members.csv
-```
-
-**Verify:** Check that `test_members.csv` contains your org members.
-
-### 2. Test with a small CSV (1-2 users)
-
-Create a test CSV with just 1-2 users who should receive licenses:
-
-```csv
-username
-your-test-user
-```
-
-```bash
-python assign_copilot_licenses.py --org YOUR-ORG --csv test_small.csv
-```
-
-**Verify:** 
-- Pre-flight summary prints without errors
-- Batch output shows `OK` with seats created
-- Status report shows `ASSIGNED` for the test user
-- Check in GitHub UI: **Organization Settings → Copilot → Access** to confirm the seat
-
-### 3. Test error scenarios
-
-| Test | How | Expected result |
-|---|---|---|
-| Bad token | `--token invalid_token_here` | `ERROR: Authentication failed` |
-| Wrong org | `--org nonexistent-org-xyz` | `ERROR: Organization 'nonexistent-org-xyz' not found` |
-| Bad CSV column | `--column wrong_column` | `ERROR: Column 'wrong_column' not found in CSV` |
-| Missing CSV file | `--csv nonexistent.csv` | `ERROR: CSV file not found` |
-| Non-member user | Put a non-org-member in CSV | Status report shows `NOT FOUND` |
-| Already assigned | Re-run the same CSV | Batch shows `0 new seats created`, status shows `ASSIGNED` |
-
-### 4. Verify in GitHub UI
-
-After running the script, confirm assignments in:
-**github.com → Organization → Settings → Copilot → Access management**
-
-### 5. Unit test with mocked API (advanced)
-
-For CI/CD integration, you can mock the GitHub API responses using `unittest.mock` or `responses` library. The key functions to mock:
-
-```python
-# In your test file
-from unittest.mock import patch
-import assign_copilot_licenses as alc
-
-@patch("assign_copilot_licenses.requests.post")
-@patch("assign_copilot_licenses.requests.get")
-def test_assign(mock_get, mock_post):
-    # Mock preflight
-    mock_get.return_value.status_code = 200
-    mock_get.return_value.json.return_value = {
-        "plan_type": "business",
-        "seat_management_setting": "assign_selected",
-        "seat_breakdown": {"total": 10, "active_this_cycle": 8}
-    }
-    # Mock assignment
-    mock_post.return_value.status_code = 201
-    mock_post.return_value.json.return_value = {"seats_created": 2}
-    
-    # Run and assert...
 ```
 
 ---
@@ -259,6 +187,7 @@ def test_assign(mock_get, mock_post):
 | `403 Forbidden` | Not an org owner, or token lacks required scopes | Check PAT scopes and org ownership |
 | `404 Resource not found` | Org doesn't exist or Copilot not enabled | Verify org name and Copilot subscription |
 | `422 Unprocessable Entity` | Copilot not configured, billing not set up, or seat management set to "all users" | Go to org Copilot settings and set access to "Selected members" |
+| `Could not auto-detect a username column` | CSV doesn't contain any of the known column names | Pass `--column <name>` with the exact column header from your CSV |
 
 ---
 
